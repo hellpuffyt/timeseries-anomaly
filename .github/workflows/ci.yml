@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: "test (${{ matrix.os }}, py${{ matrix.python-version }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Set up Python ${{ matrix.python-version }}"
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package with dev dependencies
+        run: python -m pip install --upgrade pip && pip install -e ".[dev]"
+
+      - name: Run pytest
+        run: pytest -q
+
+  lint:
+    name: "lint and type-check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package with dev dependencies
+        run: python -m pip install --upgrade pip && pip install -e ".[dev]"
+
+      - name: "Run ruff: lint"
+        run: ruff check .
+
+      - name: "Run mypy: strict type check"
+        run: mypy
+
+  smoke:
+    name: "CLI smoke test"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: python -m pip install --upgrade pip && pip install .
+
+      - name: Generate a synthetic series
+        run: timeseries-anomaly generate --output /tmp/demo.csv --days 70 --seed 42 --with-anomalies
+
+      - name: "Run detect: expect anomalies (exit code 3)"
+        run: |
+          set +e
+          timeseries-anomaly detect /tmp/demo.csv --sparkline --json /tmp/report.json
+          code=$?
+          set -e
+          if [ "$code" -ne 3 ]; then
+            echo "expected exit code 3 (anomalies found), got $code"
+            exit 1
+          fi
+          test -s /tmp/report.json
+
+      - name: Build wheel
+        run: pip install build && python -m build --wheel
