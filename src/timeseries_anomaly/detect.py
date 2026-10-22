@@ -199,14 +199,16 @@ def _localise_onset(
     min_abs_jump: float,
     first_z: float,
 ) -> tuple[int, float]:
-    """The split in ``[first, first + window)`` maximising the median jump.
+    """The split in ``[first, first + window)`` that best explains a step.
 
-    Medians plateau on a clean step (every split with a majority on each
-    side gives the same jump), so ties are broken by the jump in means,
-    which peaks exactly at the step.
+    The before/after *median* jump is flat across every split that leaves a
+    majority on each side of the step, so on its own it cannot place the
+    onset. The *mean* jump peaks exactly at the step. So: keep the splits
+    whose median jump is within 80% of the largest, and among those take the
+    largest jump in means of each window clipped to median +- 3 MAD (the
+    clipping stops a nearby spike from dragging the onset).
     """
-    best_index, best_z = first, first_z
-    best_key = (-1.0, -1.0)
+    candidates: list[tuple[int, float, float, float]] = []  # j, med_jump, mean_jump, z
     for j in range(first, min(first + window, n - window + 1)):
         b_good = deseasonalized[j - window : j][valid[j - window : j]]
         a_good = deseasonalized[j : j + window][valid[j : j + window]]
@@ -214,15 +216,23 @@ def _localise_onset(
             continue
         bm, b_mad = median_mad(b_good)
         am, a_mad = median_mad(a_good)
-        jump = abs(am - bm)
-        mean_jump = abs(float(np.mean(a_good)) - float(np.mean(b_good)))
-        if jump > best_key[0] + min_abs_jump or (
-            jump >= best_key[0] - min_abs_jump and mean_jump > best_key[1]
-        ):
-            pooled = (b_mad + a_mad) / 2.0
-            best_index, best_key = j, (max(jump, best_key[0]), mean_jump)
-            best_z = (am - bm) / pooled if pooled > min_abs_jump else float(np.sign(am - bm) * 1e9)
-    return best_index, best_z
+        mean_jump = _clipped_mean(a_good, am, a_mad) - _clipped_mean(b_good, bm, b_mad)
+        pooled = (b_mad + a_mad) / 2.0
+        z = (am - bm) / pooled if pooled > min_abs_jump else float(np.sign(am - bm) * 1e9)
+        candidates.append((j, abs(am - bm), abs(mean_jump), z))
+    if not candidates:
+        return first, first_z
+    top = max(c[1] for c in candidates)
+    plateau = [c for c in candidates if c[1] >= 0.8 * top - min_abs_jump]
+    best = max(plateau, key=lambda c: c[2])
+    return best[0], best[3]
+
+
+def _clipped_mean(values: FloatArray, center: float, scale: float) -> float:
+    if scale <= 0:
+        # No spread to clip against (e.g. a noise-free step): plain mean.
+        return float(np.mean(values))
+    return float(np.mean(np.clip(values, center - 3 * scale, center + 3 * scale)))
 
 
 def _step_sizes(
@@ -268,6 +278,39 @@ def _decompose_around_shifts(
         period=adjusted.period,
         seasonal_pattern=adjusted.seasonal_pattern,
     )
+
+
+def _noise_scale(decomposition: DecompositionResult, valid: BoolArray) -> float:
+    """Scaled MAD of leave-one-out seasonal residuals.
+
+    The seasonal component is the median of each phase's residuals, so the
+    remainder is pulled towards zero by construction: in every phase one
+    point *is* the median and has remainder exactly 0. With few cycles
+    (three weeks of hourly data at ``period=168`` means three points per
+    phase) the MAD of the remainder collapses and ordinary noise scores as
+    a 5-8 sigma anomaly. Measuring each point against the median of the
+    *other* points in its phase removes that self-influence; the resulting
+    spread is a slightly conservative estimate of the noise level.
+    """
+    remainder = decomposition.remainder
+    period = decomposition.period
+    if not np.any(decomposition.seasonal_pattern):
+        # Seasonality was not fitted (too few cycles): nothing to correct.
+        return median_mad(remainder[valid])[1]
+    detrended = remainder + decomposition.seasonal
+    loo = np.full(remainder.size, np.nan, dtype=np.float64)
+    for phase in range(period):
+        idx = np.arange(phase, remainder.size, period)
+        idx = idx[valid[idx] & np.isfinite(detrended[idx])]
+        if idx.size < 3:
+            continue
+        group = detrended[idx]
+        for k in range(idx.size):
+            loo[idx[k]] = group[k] - float(np.median(np.delete(group, k)))
+    finite = loo[np.isfinite(loo)]
+    if finite.size < 3:
+        return median_mad(remainder[valid])[1]
+    return median_mad(finite)[1]
 
 
 def detect_anomalies(
@@ -320,6 +363,8 @@ def detect_anomalies(
 
     if method == "robust":
         center, scale = median_mad(remainder[valid]) if valid.any() else (0.0, 0.0)
+        if valid.any():
+            scale = _noise_scale(decomposition, valid)
         z = modified_zscore(remainder, center=center, scale=scale)
     elif method == "hampel":
         z, _ = hampel_filter(remainder, window=hampel_window, n_sigmas=threshold)

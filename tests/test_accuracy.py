@@ -101,13 +101,13 @@ def score(seeds: range, with_shift: bool, threshold: float = 4.0) -> Score:
 def test_spike_recall_and_precision_floor() -> None:
     result = score(range(20), with_shift=False)
     assert result.recall == 1.0
-    assert result.precision >= 0.75
+    assert result.precision >= 0.95
 
 
 def test_level_shift_series_precision_and_recall_floor() -> None:
     result = score(range(20), with_shift=True)
-    assert result.recall >= 0.95
-    assert result.precision >= 0.75
+    assert result.recall >= 0.98
+    assert result.precision >= 0.95
 
 
 def test_level_shift_onset_is_the_step_not_half_a_window_early() -> None:
@@ -122,7 +122,7 @@ def test_level_shift_onset_is_the_step_not_half_a_window_early() -> None:
         assert shifts, f"seed {seed}: planted step not reported"
         assert planted.shift_at is not None
         errors.append(abs(shifts[0].start_index - planted.shift_at))
-    assert sum(e <= SHIFT_TOLERANCE for e in errors) >= 18, errors
+    assert sum(e <= SHIFT_TOLERANCE for e in errors) >= 19, errors
 
 
 def test_noise_free_step_onset_is_exact() -> None:
@@ -168,6 +168,45 @@ def test_decomposition_still_sums_to_the_values_with_a_shift() -> None:
     result = detect_anomalies(build_series(timestamps, planted.values), period=168)
     d = result.decomposition
     np.testing.assert_allclose(d.trend + d.seasonal + d.remainder, planted.values, atol=1e-9)
+
+
+def test_clean_noisy_series_rarely_alarms() -> None:
+    # The phase medians pulled the remainder towards zero, so its MAD
+    # underestimated the noise: ~1.3 false spikes per clean 70-day series
+    # at the default threshold. The scale now comes from leave-one-out
+    # seasonal residuals (measured 0.2 per series over 30 seeds).
+    timestamps = hourly_timestamps(N)
+    alarms = 0
+    for seed in range(20):
+        values = weekly_seasonal_values(N, rng=np.random.default_rng(1000 + seed), noise_std=1.0)
+        alarms += len(detect_anomalies(build_series(timestamps, values), period=168).anomalies)
+    assert alarms <= 8
+
+
+def test_bundled_weekly_example_raises_no_alarms() -> None:
+    # examples/weekly_seasonal.csv is documented as demonstrating the
+    # weekend false-positive guard; with three weeks of data (three points
+    # per phase) it used to report 38 anomalies.
+    from pathlib import Path
+
+    from timeseries_anomaly.io import load_file
+    from timeseries_anomaly.series import build_series as build
+
+    path = Path(__file__).resolve().parent.parent / "examples" / "weekly_seasonal.csv"
+    loaded = load_file(str(path))
+    [(timestamps, values)] = [(ts, vs) for ts, vs in loaded.values()]
+    result = detect_anomalies(build(timestamps, values), period=168)
+    assert result.anomalies == []
+
+
+def test_cli_generated_demo_shift_onset_is_exact() -> None:
+    # `timeseries-anomaly generate --with-anomalies` plants the step at 2n/3.
+    timestamps = hourly_timestamps(N)
+    values = weekly_seasonal_values(N, rng=np.random.default_rng(42), noise_std=1.0)
+    values[(2 * N) // 3 :] += 15.0
+    result = detect_anomalies(build_series(timestamps, values), period=168)
+    [shift] = [a for a in result.anomalies if a.type == "level_shift"]
+    assert shift.start_index == (2 * N) // 3
 
 
 if __name__ == "__main__":  # pragma: no cover - reporting helper

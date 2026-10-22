@@ -79,8 +79,9 @@ compares the robust centre of the window before a candidate point to the
 window after it; when the jump is large relative to the local spread
 *and* the new level is itself stable, it's reported once, as a single
 `level_shift` event, and the individual points inside it are not also
-reported as spikes. The reported onset is the split point (within one
-window of first detection) where the before/after medians differ most, so it
+reported as spikes. The reported onset is chosen, within one window of
+first detection, among the splits whose before/after median jump is near its
+maximum, as the one with the largest jump in (3-MAD-clipped) means -- so it
 lands on the step rather than half a window early, and the description's
 "baseline moved from ~X to ~Y" is measured on the deseasonalized series.
 Detected steps are then modelled as part of the trend and the series is
@@ -255,20 +256,25 @@ must be within 3 samples; default `--period 168`):
 
 | Scenario | `--threshold` | Precision | Recall |
 | --- | --- | --- | --- |
-| spikes only | 4.0 (default) | 0.801 | 1.000 |
+| spikes only | 4.0 (default) | 0.988 | 1.000 |
 | spikes only | 5.0 | 0.996 | 1.000 |
-| spikes + level shift | 4.0 (default) | 0.797 | 0.980 |
-| spikes + level shift | 5.0 | 0.974 | 0.980 |
+| spikes + level shift | 4.0 (default) | 0.993 | 1.000 |
+| spikes + level shift | 5.0 | 1.000 | 1.000 |
+
+Before the fixes in this version, the same harness measured precision 0.801 /
+0.797 and recall 1.000 / 0.833 at the default threshold.
 
 These are numbers for this synthetic generator only, not for real metrics.
 
 ## Limitations
 
-- At the default threshold of 4.0, a clean series with Gaussian noise gets
-  about 1.3 false spikes per 1,680 points (measured over 30 seeds). The
-  per-phase median seasonal fit pulls residuals towards zero, so the MAD of
-  the remainder underestimates its spread (about 0.86 vs a true 0.97 here).
-  Use `--threshold 5` if false alarms are costly; see the table above.
+- At the default threshold of 4.0, a clean series with N(0,1) noise gets
+  about 0.2 false spikes per 1,680 points (measured over 30 seeds).
+- The `robust` method measures the noise level from leave-one-out seasonal
+  residuals (each point against the median of the *other* points in its
+  phase), because the phase-median fit pulls the remainder itself towards
+  zero. `--method hampel` uses the remainder's local MAD directly and does
+  not have this correction, so it is more alarm-prone on short series.
 - The decomposition assumes one dominant seasonal period at a time; a
   series with strong daily *and* weekly seasonality will only have the
   period you select modeled explicitly (the other leaks into trend/

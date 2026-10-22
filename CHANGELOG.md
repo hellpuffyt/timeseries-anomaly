@@ -10,10 +10,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Level-shift onsets were reported 5-11 samples before the real step (the
   first split where just over half the "after" window had moved). The onset is
-  now localised to the split with the largest before/after jump.
+  now localised within the median-jump plateau by the largest clipped-mean jump.
 - The level-shift description took before/after medians of raw values, mixing
   in the daily cycle (a 15-unit step could read as 5.5); it now uses the
   deseasonalized series.
+- The robust threshold divided by the MAD of the remainder, which the
+  phase-median seasonal fit shrinks towards zero (one point per phase *is*
+  the median). Clean noisy series got ~1.3 false spikes per 70 days, and the
+  bundled `examples/weekly_seasonal.csv` (three weeks) reported 38 anomalies.
+  The noise scale now comes from leave-one-out seasonal residuals.
 - False spikes clustered on both sides of a level shift because the trend lags
   the step (35 within 60 samples over 50 seeds, now 2). Detected steps are
   modelled in the trend before spikes are scored.
