@@ -177,11 +177,140 @@ def detect_level_shifts(
         # compared to the jump.
         stable_after = a_mad <= abs(diff) * 1.5 + min_abs_jump
         if abs(z) >= threshold and stable_after:
-            shifts.append((i, float(z)))
-            i += window  # cool down so one shift isn't reported many times
+            # The test first passes as soon as just over half of the
+            # "after" window sits on the new level, i.e. up to window/2
+            # samples *before* the real step. Localise the onset to the
+            # split, within the next window, where the before/after
+            # medians differ most -- for a clean step that is the step.
+            onset, onset_z = _localise_onset(deseasonalized, valid, i, window, n, min_abs_jump, float(z))
+            shifts.append((onset, onset_z))
+            i = onset + window  # cool down so one shift isn't reported many times
         else:
             i += 1
     return shifts
+
+
+def _localise_onset(
+    deseasonalized: FloatArray,
+    valid: BoolArray,
+    first: int,
+    window: int,
+    n: int,
+    min_abs_jump: float,
+    first_z: float,
+) -> tuple[int, float]:
+    """The split in ``[first, first + window)`` that best explains a step.
+
+    The before/after *median* jump is flat across every split that leaves a
+    majority on each side of the step, so on its own it cannot place the
+    onset. The *mean* jump peaks exactly at the step. So: keep the splits
+    whose median jump is within 80% of the largest, and among those take the
+    largest jump in means of each window clipped to median +- 3 MAD (the
+    clipping stops a nearby spike from dragging the onset).
+    """
+    candidates: list[tuple[int, float, float, float]] = []  # j, med_jump, mean_jump, z
+    for j in range(first, min(first + window, n - window + 1)):
+        b_good = deseasonalized[j - window : j][valid[j - window : j]]
+        a_good = deseasonalized[j : j + window][valid[j : j + window]]
+        if b_good.size < window // 2 or a_good.size < window // 2:
+            continue
+        bm, b_mad = median_mad(b_good)
+        am, a_mad = median_mad(a_good)
+        mean_jump = _clipped_mean(a_good, am, a_mad) - _clipped_mean(b_good, bm, b_mad)
+        pooled = (b_mad + a_mad) / 2.0
+        z = (am - bm) / pooled if pooled > min_abs_jump else float(np.sign(am - bm) * 1e9)
+        candidates.append((j, abs(am - bm), abs(mean_jump), z))
+    if not candidates:
+        return first, first_z
+    top = max(c[1] for c in candidates)
+    plateau = [c for c in candidates if c[1] >= 0.8 * top - min_abs_jump]
+    best = max(plateau, key=lambda c: c[2])
+    return best[0], best[3]
+
+
+def _clipped_mean(values: FloatArray, center: float, scale: float) -> float:
+    if scale <= 0:
+        # No spread to clip against (e.g. a noise-free step): plain mean.
+        return float(np.mean(values))
+    return float(np.mean(np.clip(values, center - 3 * scale, center + 3 * scale)))
+
+
+def _step_sizes(
+    deseasonalized: FloatArray, shifts: list[tuple[int, float]], window: int
+) -> list[tuple[int, float]]:
+    """(onset, jump) per shift: median after minus median before, in value units."""
+    steps: list[tuple[int, float]] = []
+    for onset, _ in shifts:
+        before = deseasonalized[max(0, onset - window) : onset]
+        after = deseasonalized[onset : onset + window]
+        before = before[~np.isnan(before)]
+        after = after[~np.isnan(after)]
+        if before.size and after.size:
+            steps.append((onset, float(np.median(after) - np.median(before))))
+    return steps
+
+
+def _decompose_around_shifts(
+    values: FloatArray,
+    valid: BoolArray,
+    period: int,
+    deseasonalized: FloatArray,
+    shifts: list[tuple[int, float]],
+    window: int,
+) -> DecompositionResult:
+    """Decompose with detected steps modelled as part of the trend.
+
+    A moving-median trend lags a step by up to half its window, and the
+    phase medians absorb part of it, so the remainder on both sides of a
+    real level shift is biased and throws false spikes. Removing the
+    estimated steps, decomposing, and adding the steps back into the trend
+    keeps ``trend + seasonal + remainder == values`` while scoring the
+    remainder of a series whose level is continuous.
+    """
+    step = np.zeros(values.size, dtype=np.float64)
+    for onset, jump in _step_sizes(deseasonalized, shifts, window):
+        step[onset:] += jump
+    adjusted = decompose(values - step, valid=valid, period=period)
+    return DecompositionResult(
+        trend=adjusted.trend + step,
+        seasonal=adjusted.seasonal,
+        remainder=adjusted.remainder,
+        period=adjusted.period,
+        seasonal_pattern=adjusted.seasonal_pattern,
+    )
+
+
+def _noise_scale(decomposition: DecompositionResult, valid: BoolArray) -> float:
+    """Scaled MAD of leave-one-out seasonal residuals.
+
+    The seasonal component is the median of each phase's residuals, so the
+    remainder is pulled towards zero by construction: in every phase one
+    point *is* the median and has remainder exactly 0. With few cycles
+    (three weeks of hourly data at ``period=168`` means three points per
+    phase) the MAD of the remainder collapses and ordinary noise scores as
+    a 5-8 sigma anomaly. Measuring each point against the median of the
+    *other* points in its phase removes that self-influence; the resulting
+    spread is a slightly conservative estimate of the noise level.
+    """
+    remainder = decomposition.remainder
+    period = decomposition.period
+    if not np.any(decomposition.seasonal_pattern):
+        # Seasonality was not fitted (too few cycles): nothing to correct.
+        return median_mad(remainder[valid])[1]
+    detrended = remainder + decomposition.seasonal
+    loo = np.full(remainder.size, np.nan, dtype=np.float64)
+    for phase in range(period):
+        idx = np.arange(phase, remainder.size, period)
+        idx = idx[valid[idx] & np.isfinite(detrended[idx])]
+        if idx.size < 3:
+            continue
+        group = detrended[idx]
+        for k in range(idx.size):
+            loo[idx[k]] = group[k] - float(np.median(np.delete(group, k)))
+    finite = loo[np.isfinite(loo)]
+    if finite.size < 3:
+        return median_mad(remainder[valid])[1]
+    return median_mad(finite)[1]
 
 
 def detect_anomalies(
@@ -222,10 +351,20 @@ def detect_anomalies(
 
     valid = series.valid_mask
     decomposition = decompose(series.values, valid=valid, period=period)
+
+    deseasonalized = series.values - decomposition.seasonal
+    shifts = detect_level_shifts(deseasonalized, valid, window=shift_window, threshold=shift_threshold)
+    if shifts:
+        decomposition = _decompose_around_shifts(
+            series.values, valid, period, deseasonalized, shifts, shift_window
+        )
+        deseasonalized = series.values - decomposition.seasonal
     remainder = decomposition.remainder
 
     if method == "robust":
         center, scale = median_mad(remainder[valid]) if valid.any() else (0.0, 0.0)
+        if valid.any():
+            scale = _noise_scale(decomposition, valid)
         z = modified_zscore(remainder, center=center, scale=scale)
     elif method == "hampel":
         z, _ = hampel_filter(remainder, window=hampel_window, n_sigmas=threshold)
@@ -235,9 +374,6 @@ def detect_anomalies(
     z = np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
     candidate_mask = valid & (np.abs(z) > threshold)
 
-    deseasonalized = series.values - decomposition.seasonal
-    shifts = detect_level_shifts(deseasonalized, valid, window=shift_window, threshold=shift_threshold)
-
     anomalies: list[Anomaly] = []
     suppressed = np.zeros(len(series), dtype=bool)
     n = len(series)
@@ -246,9 +382,11 @@ def detect_anomalies(
         band_start = max(0, onset - shift_window // 2)
         band_end = min(n, onset + shift_window)
         suppressed[band_start:band_end] = True
-        after_vals = series.values[onset : min(n, onset + shift_window)]
+        # Levels are read from the deseasonalized series: raw values mix
+        # in the daily/weekly shape and misstate the size of the step.
+        after_vals = deseasonalized[onset : min(n, onset + shift_window)]
         after_vals = after_vals[~np.isnan(after_vals)]
-        before_vals = series.values[max(0, onset - shift_window) : onset]
+        before_vals = deseasonalized[max(0, onset - shift_window) : onset]
         before_vals = before_vals[~np.isnan(before_vals)]
         before_level = float(np.median(before_vals)) if before_vals.size else float("nan")
         after_level = float(np.median(after_vals)) if after_vals.size else float("nan")
@@ -299,9 +437,7 @@ def detect_anomalies(
         n_points=n,
         n_short_gaps=series.n_short_gaps,
         n_long_gaps=series.n_long_gaps,
-        long_gap_ranges=[
-            (series.timestamps[s], series.timestamps[e - 1]) for s, e in series.long_gap_ranges
-        ],
+        long_gap_ranges=[(series.timestamps[s], series.timestamps[e - 1]) for s, e in series.long_gap_ranges],
         period=period,
         method=method,
         threshold=threshold,
