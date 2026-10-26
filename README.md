@@ -206,8 +206,9 @@ timeseries-anomaly detect demo.csv --sparkline --json report.json
 
 Exit code is `0` when no anomalies are found and `3` when at least one is
 reported, so alerting pipelines and CI smoke checks can branch on it. Input
-errors (a missing file, an unparseable timestamp) currently end with a Python
-traceback and exit code `1`.
+errors (a missing or unreadable file, an unparseable CSV/JSON or timestamp, an
+unsupported extension, an invalid option such as `--period 1`) print a
+one-line `error: ...` message to stderr and exit with code `1`.
 
 Both bundled examples also run as-is:
 

@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `detect` input errors (missing file, unparseable CSV/JSON or timestamp,
+  unsupported extension, invalid options) ended in an uncaught Python
+  traceback; they now print a one-line `error: ...` to stderr and exit 1.
+- `detect --help` said the period fell back to 0; it now describes the real
+  default (168, 24, else `min(24, n/4)`, at least 2).
 - Level-shift onsets were reported 5-11 samples before the real step (the
   first split where just over half the "after" window had moved). The onset is
   now localised within the median-jump plateau by the largest clipped-mean jump.
