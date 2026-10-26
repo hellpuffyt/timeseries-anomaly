@@ -103,6 +103,36 @@ def test_detect_on_multi_series_json(tmp_path: Path) -> None:
     assert code in (0, 3)
 
 
-def test_detect_missing_file_raises() -> None:
-    with pytest.raises(FileNotFoundError):
-        main(["detect", "/no/such/file.csv"])
+@pytest.mark.parametrize(
+    ("name", "content"),
+    [
+        ("missing.csv", None),
+        ("bad_timestamp.csv", b"timestamp,value\nnot-a-date,1\n"),
+        ("bad_columns.csv", b"a,b\n1,2\n"),
+        ("bad.json", b"{bad"),
+        ("not_utf8.csv", b"\xff\xfe"),
+        ("series.txt", b"timestamp,value\n"),
+    ],
+)
+def test_detect_invalid_input_is_a_one_line_error_with_exit_1(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], name: str, content: bytes | None
+) -> None:
+    # Before: each of these ended in an uncaught Python traceback.
+    path = tmp_path / name
+    if content is not None:
+        path.write_bytes(content)
+    code = main(["detect", str(path)])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.err.startswith("error: ")
+    assert len(captured.err.strip().splitlines()) == 1
+    assert "Traceback" not in captured.err
+
+
+def test_detect_help_describes_the_real_period_fallback(capsys: pytest.CaptureFixture[str]) -> None:
+    # Before: the help said the period fell back to 0; the code uses min(24, n/4), at least 2.
+    with pytest.raises(SystemExit):
+        main(["detect", "--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "else 0" not in help_text
+    assert "min(24, n/4)" in help_text

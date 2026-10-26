@@ -32,7 +32,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--period",
         type=int,
         default=None,
-        help="seasonal period in samples (default: 168 for hourly data spanning >=2 weeks, else 24, else 0)",
+        help=(
+            "seasonal period in samples (default: 168 for hourly data spanning >=2 weeks, "
+            "24 for hourly data spanning >=2 days, else min(24, n/4), at least 2)"
+        ),
     )
     detect_p.add_argument("--method", choices=["robust", "hampel"], default="robust")
     detect_p.add_argument(
@@ -202,7 +205,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "detect":
-        return cmd_detect(args)
+        try:
+            return cmd_detect(args)
+        except (OSError, ValueError) as exc:
+            # Bad input (missing/unreadable file, unparseable CSV/JSON, bad
+            # timestamps, invalid options) is a one-line error, not a traceback.
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     if args.command == "generate":
         return cmd_generate(args)
     parser.print_help()
