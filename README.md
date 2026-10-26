@@ -4,6 +4,59 @@ Detect anomalies in metric time series using seasonal decomposition and
 robust statistics, tuned specifically to stop suppressing legitimate
 weekend and off-hours behaviour.
 
+## Demo
+
+<img src="docs/screenshots/detect-demo-sparkline.png" width="100%" alt="Terminal capture: timeseries-anomaly generates a seeded 70-day hourly series, then detect reports one critical spike on 2026-01-28 08:00 and one critical level shift from about 28.8 to 43.33 on 2026-02-20, prints a wrapped ASCII sparkline with carets under the anomalies, writes report.json and exits 3">
+
+A real terminal run of the two commands from [Usage](#usage) in an empty
+directory. The generator plants one spike and one level shift; `detect`
+finds both, reports the step once instead of as 24 spikes, and marks them
+with `^` under the sparkline (120 samples per row, one row per 5 days).
+Exit code 3 means anomalies were found.
+
+```console
+$ timeseries-anomaly generate --output demo.csv --days 70 --seed 42 --with-anomalies
+wrote 1680 points to demo.csv
+$ timeseries-anomaly detect demo.csv --sparkline --json report.json; echo "exit $?"
+series: default
+points: 1680  period: 168  method: robust
+gaps: 0 interpolated, 0 flagged as long gaps
+anomalies found: 2
+  [critical] spike        2026-01-28T08:00:00 -> 2026-01-28T08:00:00 (n=1, |z|=39.83) deviates 39.83x the robust noise level from the expected seasonal baseline
+  [critical] level_shift  2026-02-20T16:00:00 -> 2026-02-21T15:00:00 (n=24, |z|=16.06) sustained level shift: baseline moved from ~28.8 to ~43.33
+. .. .::++#%%@@%%##*=::-....--=:=+#%%%%@%%**+=:--... --:=#*%#%@@%%*++:-......-::++*##@%%%%#*==-.  . .:-==+*#%#@%%*#++==-
+                                                                                                                        
+ . ...-.--::==::====-. .    .....-:====:::=-:.-.--.---:=**#%@%%@%%#+=+=---..--:=+##%#%%%%##++=::--..-:::+*%@%%%%%%**==:-
+                                                                                                                        
+--..=-:+#+#%@%%@%##++==:::---::=+#%%#%@%%*#*+==:....- --::-=+:+==::=::---.....-.::==+=:=::=:---.--:-.:=+*+*%#@@@%%#*+=::
+                                                                                                                        
+---.-:::+**%%%%@#*#+++--..-----==*##%%%####++=::... -::=+**%##%####*==::-.-.--:=+**%##%%%#***+:-. . .   .-:==:=::::-:..-
+                                                                                                                        
+       ...............    ......----::::-----.....  .....----::::----.....   ...@---:::::----..... . ...----::-::----.. 
+                                                                                ^                                       
+:-:--:=+=**##%%%%#*#+==-...-  -:--::=:==:==:--- ..-.-.---:=::====:-:-.-.-.--=:==**##%%@@%##**::-...-:::=*+*%%@%@###+=+:-
+                                                                                                                        
+-:..-==+=+##%%%%%%*+*+:--::---:==##%#%%%%%#*+:=:-:::-=:==*##%%@%%##*==:-.. .------:====:==:::-.-... .-...:::=:=+:::--::.
+                                                                                                                        
+:.-.--+==**#%%%%%#+*=::-.- ..-::+++*%%%%%%*+==:-  ...-:==+#*%%%@#%*++:---.----=-=+*##@%%##**++:-..---::=++*+%*#%%***=+:-
+                                                                                                                        
+-. ....-:::=====+::::.--.. ...-::=:====+=:::---.:-.:--:=+*#%%@@@##**++=:----::=++##%%%%@%%**+*:=-----=:++**%@%@%%#****:=
+                                                                                                                        
+. . ....-:::======:::-.. .  ..---::=====%%###**+=====+++++**#+*****+*++++=+==+=+++*+**##**+++++=+++++***##%%%%@@%%%%***+
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^                                                        
+.-----:=**##%%###**#++=:-----::==*##%%@@@#%**=:--.-:-::=+*%#%%@%%#**+==:--.--===*+*%%%%%@%#*+:=:    . ---.:=-=:=:=:=--.-
+                                                                                                                        
+... .--.-:-:===+==+:---.-:--:::++*%%%%%%%%*#++:=::.::-=+**#@@#@%#%%**=:=--.:::==**##%@@@%%##=+=-=:---:=++*#%@@@%%##*+::=
+                                                                                                                        
+--.:-:++++*%%%@%@#%*+=::..    ----::+:=+==:::.- .. .....--:::=+===-::--.:..--:::==*#%@@%#%#**==-:..:-::=***#%%#%##*+++=:
+                                                                                                                        
+--..--:=++##%%##%%+**==--..:-:::++##%%@%%%#+++=:-----::+#+##%%@@%%+#++:-.... ----:-=:==+=::=:--.. ..-.-::-:====:==:-:-..
+                                                                                                                        
+
+wrote report.json
+exit 3
+```
+
 ## What
 
 A small, dependency-light (numpy only) library and CLI that:
@@ -22,7 +75,7 @@ Threshold alerts fire every Saturday because traffic legitimately halves,
 and every deploy window because latency legitimately spikes for a minute.
 Teams respond by raising the threshold until the alert catches nothing
 useful at all. The actual fix is to model the *expected* shape of the
-metric -- its daily and weekly rhythm -- and alert on deviation from
+metric (its daily and weekly rhythm) and alert on deviation from
 *that*, using statistics that a handful of extreme points cannot poison.
 
 This package implements that pipeline from first principles with numpy,
@@ -34,12 +87,12 @@ unit-testable rather than hidden behind a library's `STL()` call.
 
 Given a value `y[t]` on a regular grid:
 
-1. **Trend** -- a centred moving *median* over one seasonal period
+1. **Trend**: a centred moving *median* over one seasonal period
    (window = period, rounded up to odd). A median does not get dragged
    by a handful of extreme points the way a moving average would; those
    points get smeared into the trend, silently absorbing part of the
    very anomaly you are trying to detect.
-2. **Seasonal** -- after subtracting the trend, group the residual by
+2. **Seasonal**: after subtracting the trend, group the residual by
    its position within the period (hour-of-day for `period=24`,
    hour-of-week for `period=168` on hourly data) and take the *median*
    of each group. This produces one repeating seasonal pattern, centred
@@ -47,7 +100,7 @@ Given a value `y[t]` on a regular grid:
    headline feature: a Saturday 3am reading is compared against every
    other Saturday 3am in the series, not against a Tuesday-afternoon
    average.
-3. **Remainder** -- `y[t] - trend[t] - seasonal[t]`. What's left is
+3. **Remainder**: `y[t] - trend[t] - seasonal[t]`. What's left is
    scored for anomalies.
 
 ### Robust thresholds
@@ -81,7 +134,7 @@ window after it; when the jump is large relative to the local spread
 `level_shift` event, and the individual points inside it are not also
 reported as spikes. The reported onset is chosen, within one window of
 first detection, among the splits whose before/after median jump is near its
-maximum, as the one with the largest jump in (3-MAD-clipped) means -- so it
+maximum, as the one with the largest jump in (3-MAD-clipped) means, so it
 lands on the step rather than half a window early, and the description's
 "baseline moved from ~X to ~Y" is measured on the deseasonalized series.
 Detected steps are then modelled as part of the trend and the series is
@@ -94,7 +147,7 @@ Raw timestamps are resampled onto a regular grid at the inferred (or
 supplied) sampling frequency. Gaps up to `--max-gap-samples` (default 3)
 are linearly interpolated and marked `interpolated`. Longer gaps are
 left as `NaN`, excluded from decomposition and thresholding, and
-reported separately as `long_gap` ranges -- never silently treated as
+reported separately as `long_gap` ranges. They are never silently treated as
 zero, which would itself look like a giant anomaly (or mask a real one).
 
 ## Features
@@ -151,22 +204,49 @@ timeseries-anomaly generate --output demo.csv --days 70 --seed 42 --with-anomali
 timeseries-anomaly detect demo.csv --sparkline --json report.json
 ```
 
-Exit code is `0` when no anomalies are found, `3` when at least one is
-reported (handy for alerting pipelines / CI smoke checks).
+Exit code is `0` when no anomalies are found and `3` when at least one is
+reported, so alerting pipelines and CI smoke checks can branch on it. Input
+errors (a missing file, an unparseable timestamp) currently end with a Python
+traceback and exit code `1`.
+
+Both bundled examples also run as-is:
+
+```console
+$ python examples/generate_demo.py      # spike + level shift, 2 anomalies found
+$ timeseries-anomaly detect examples/weekly_seasonal.csv
+series: default
+points: 504  period: 168  method: robust
+gaps: 0 interpolated, 0 flagged as long gaps
+anomalies found: 0
+```
 
 ### CLI options (`detect`)
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--period` | auto (168/24/adaptive) | samples per seasonal cycle |
+| `--period` | auto | samples per seasonal cycle; 168 for hourly data with at least 2 weeks, 24 for hourly data with at least 2 days, otherwise `min(24, n/4)` (at least 2) |
 | `--method` | `robust` | `robust` (global MAD) or `hampel` (rolling local MAD) |
 | `--threshold` | `4.0` | modified z-score magnitude to flag |
+| `--hampel-window` | `7` | rolling window for `--method hampel` |
 | `--min-consecutive` | `1` | suppress spike runs shorter than this |
 | `--shift-window` / `--shift-threshold` | `24` / `5.0` | level-shift detector window and sensitivity |
 | `--max-gap-samples` | `3` | longest run of missing samples to interpolate |
 | `--freq-seconds` | inferred | override the sampling frequency |
 | `--json PATH` | - | write a detailed JSON report |
 | `--sparkline` | off | print an ASCII sparkline with anomalies marked |
+| `--sparkline-width` | `120` | samples per sparkline row |
+| `--quiet` | off | suppress the human-readable summary |
+
+### CLI options (`generate`)
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--output PATH` | required | CSV file to write |
+| `--days` | `70` | length of the hourly series |
+| `--seed` | `0` | RNG seed; the same seed gives the same file |
+| `--with-anomalies` | off | plant one spike and one level shift |
+| `--noise` | `1.0` | standard deviation of the Gaussian noise |
+| `--start` | `2026-01-05T00:00:00` | first timestamp (a Monday) |
 
 ## Input formats
 
@@ -224,23 +304,28 @@ a unix epoch (seconds).
 
 See `examples/`:
 
-- `examples/generate_demo.py` -- builds and analyzes a synthetic series
+- `examples/generate_demo.py` builds and analyzes a synthetic series
   with a planted spike and level shift end to end.
-- `examples/weekly_seasonal.csv` -- a small hand-built series
+- `examples/weekly_seasonal.csv` is a small hand-built series (3 weeks)
   demonstrating the weekend false-positive guard.
 
 ## Testing
 
 ```bash
 pip install -e ".[dev]"
-pytest
+pytest                          # 105 tests
 ruff check .
-mypy
+mypy                            # strict, src and tests
+python -m tests.test_accuracy   # the precision/recall table below (about 30 s)
 ```
+
+CI runs pytest on Ubuntu, Windows and macOS with Python 3.10 to 3.13, ruff
+and strict mypy on 3.12, and a smoke job that runs the Usage commands above,
+expects exit code 3, and builds a wheel.
 
 The test suite is built entirely on synthetic series where the ground
 truth is known: planted spikes, planted level shifts, clean seasonal
-series that must produce zero anomalies (including at weekends -- the
+series that must produce zero anomalies (including at weekends, the
 headline guarantee), poisoned-outlier scenarios that would fool a
 mean/stddev threshold but not MAD, short gaps that must be interpolated,
 long gaps that must be flagged and excluded, a flat constant series that
@@ -297,9 +382,15 @@ This tool only reads local CSV/JSON files supplied on the command line
 and performs local numeric computation; it makes no network calls. When
 loading JSON, standard library `json.load` is used (no arbitrary code
 execution). If you feed it untrusted files, the usual caution around
-resource limits for very large inputs still applies -- there is no
+resource limits for very large inputs still applies: there is no
 built-in row-count cap.
+
+Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT, copyright 2026 Prabesh Sharma. See [LICENSE](LICENSE).
